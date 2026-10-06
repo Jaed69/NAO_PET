@@ -1,76 +1,87 @@
-# 🤖 NAO V2 - Sistema de Control Inteligente para Robot NAO
+# NAO_PET: Voice- and Vision-Controlled NAO Robot
 
-Este proyecto implementa un sistema de control avanzado para el robot humanoide NAO, dotándolo de capacidades de visión artificial (YOLOv8) y procesamiento de lenguaje natural para seguir instrucciones de voz y rastrear objetos en tiempo real.
+A humanoid NAO robot that listens to Spanish voice commands, infers what object you need with a local LLM, finds it with open-vocabulary vision, walks toward it and points at it.
 
-## 📋 Descripción
+Versión en español: [README.es.md](README.es.md)
 
-El sistema se divide en dos módulos principales que se comunican vía Sockets TCP/IP:
+## Problem
 
-1.  **El Cerebro (`nao_brain_v3.py`)**:
-    *   Se ejecuta en una computadora externa (PC/Servidor).
-    *   Procesa el video enviado por el robot utilizando **YOLO-World** para detección de objetos en tiempo real.
-    *   Escucha comandos de voz a través del micrófono del PC (`modulo_oido`).
-    *   Utiliza un LLM (Ollama) para interpretar intenciones complejas (`modulo_cerebro`).
-    *   Envía comandos de movimiento y control al robot.
+Classic robot demos hard-code a fixed list of objects and commands. This project explores a more natural loop: you say "I'm dying of thirst", the robot infers "bottle", searches for it, approaches it and tells you it found it.
 
-2.  **El Cuerpo (`nao_body_v4.py`)**:
-    *   Se ejecuta en el entorno del robot (o una máquina con NAOqi SDK compatible, Python 2.7).
-    *   Transmite el video de la cámara del NAO al cerebro.
-    *   Recibe coordenadas y comandos de navegación.
-    *   Ejecuta movimientos (caminar, mover la cabeza) y síntesis de voz (TTS).
+## Approach
 
-## 🚀 Funcionalidades
+The system is split in two processes connected by TCP, because the robot's SDK (NAOqi) runs on Python 2.7 while the AI stack needs modern Python and, ideally, a GPU.
 
-*   **Rastreo Visual**: El robot mueve la cabeza para seguir objetos detectados (personas, celulares, botellas, etc.).
-*   **Navegación Autónoma**: Puede caminar hacia un objetivo detectado hasta alcanzar una distancia segura.
-*   **Control por Voz**:
-    *   *Comandos Directos*: "Acércate", "Ven", "Para", "Quieto".
-    *   *Inteligencia Artificial*: Puede interpretar órdenes para buscar objetos específicos (ej. "Busca una botella").
-*   **Interacción**: El robot habla y señala los objetos cuando los encuentra.
+```mermaid
+flowchart LR
+    subgraph Robot["Body (Python 2.7 + NAOqi)"]
+        CAM[Camera] -->|JPEG frames| NET1[TCP client]
+        NET1 --> CTRL[Head tracking / walking / TTS / pointing]
+    end
+    subgraph PC["Brain (Python 3)"]
+        NET2[TCP server :8080] --> YOLO[YOLO-World detector]
+        MIC[Microphone] --> ASR[faster-whisper small]
+        ASR -->|reflex words| STATE[Shared state]
+        ASR -->|other phrases| LLM[Ollama gemma3n]
+        LLM -->|English class name| STATE
+        STATE -->|set_classes| YOLO
+        YOLO -->|dx, dy, area, count, name, walk#| NET2
+    end
+    NET1 <--> NET2
+```
 
-## 🛠️ Requisitos
+- **Vision (`nao_brain_v3.py`):** YOLO-World `yolov8s-worldv2` with a target class that can be switched at runtime; picks the largest box (closest object) and sends normalized offsets and area to the robot. Detection confidence threshold 0.13.
+- **Hearing (`modulo_oido.py`):** faster-whisper `small` in Spanish with voice-activity filtering and a fuzzy wake-word match.
+- **Intent (`modulo_cerebro.py`):** `gemma3n` served by Ollama, prompted (temperature 0) to answer with a single English object name or `null`.
+- **Body (`nao_body_v4.py`):** proportional head tracking, walking toward the object until it fills about 10% of the frame (backing off if it exceeds 25%), then pointing with the right arm and speaking once.
+- **Reflexes:** "ven / acércate / camina" and "para / alto / quieto" bypass the LLM for low latency. The robot starts idle for safety.
 
-### Para el "Cerebro" (PC)
-*   Python 3.8+
-*   Librerías principales:
-    *   `ultralytics` (YOLOv8)
-    *   `opencv-python`
-    *   `torch` (con soporte CUDA recomendado)
-    *   `numpy`
-    *   Ollama (para el módulo de cerebro)
+## Results
 
-### Para el "Cuerpo" (Robot NAO)
-*   Python 2.7 (Estándar en NAOqi)
-*   SDK de NAOqi (`pynaoqi`)
-*   Librerías: `opencv` (versión compatible con Py2.7), `numpy`.
+No detection success rate or end-to-end latency has been measured, and there is no demo recording in the repository.
 
-## 🔧 Instalación y Uso
+## Tech stack
 
-1.  **Configuración de Red**:
-    *   Asegúrate de que tanto el PC como el NAO estén en la misma red.
-    *   Edita `nao_body_v4.py` y ajusta `SERVER_IP` con la IP de tu PC.
-    *   Edita `nao_body_v4.py` y ajusta `ROBOT_IP` con la IP de tu NAO.
+Python 3, Python 2.7 (NAOqi 2.8.6), PyTorch, Ultralytics YOLO-World, OpenCV, faster-whisper, SpeechRecognition, thefuzz, Ollama (gemma3n).
 
-2.  **Ejecutar el Cerebro**:
-    En tu PC, ejecuta el script principal:
-    ```bash
-    python nao_brain_v3.py
-    ```
-    *Esperar a que cargue el modelo YOLO y el servidor socket.*
+## How to run
 
-3.  **Ejecutar el Cuerpo**:
-    Conéctate al robot (o desde tu entorno con NAOqi) y corre:
-    ```bash
-    python nao_body_v4.py
-    ```
+Requirements: a NAO robot on the same network, the NAOqi Python 2.7 SDK, a PC with [Ollama](https://ollama.com) (`ollama pull gemma3n`) and ideally a CUDA GPU. The YOLO-World weights file (`yolov8s-worldv2.pt`) is git-ignored and not included in the repository. There is no `requirements.txt`; the Python 3 imports are:
 
-## 📂 Estructura del Proyecto
+```bash
+pip install ultralytics opencv-python torch numpy faster-whisper SpeechRecognition pyaudio thefuzz requests
+```
 
-*   `nao_brain_v3.py`: Script principal del servidor de procesamiento.
-*   `nao_body_v4.py`: Script cliente que controla el hardware del robot.
-*   `modulo_oido.py`: Sistema de reconocimiento de voz.
-*   `modulo_cerebro.py`: Interfaz con el LLM (Ollama).
-*   `yolov8s-worldv2.pt`: Modelo de pesos para la red neuronal.
+```bash
+# PC (brain), Python 3
+python nao_brain_v3.py          # waits for the NAO body to connect
 
-## ⚠️ Notas
-*   El script del cuerpo asume que el SDK de NAOqi está en `C:\pynaoqi-python2.7-2.8.6.23`. Ajusta la variable `BASE_SDK` si tu instalación es diferente.
+# Robot side (Python 2.7 with NAOqi): edit SERVER_IP, ROBOT_IP and the SDK path in nao_body_v4.py first
+python nao_body_v4.py
+```
+
+Say "ven" to walk, "para" to stop, or ask for an object to change the target.
+
+## Project structure
+
+```
+nao_brain_v3.py     brain: vision server + voice/LLM thread
+nao_body_v4.py      body: NAOqi client (Python 2.7)
+modulo_oido.py      speech recognition and wake word
+modulo_cerebro.py   LLM intent -> object class
+modulo_vision.py    YOLO-World wrapper (not imported by nao_brain_v3.py)
+```
+
+## Limitations
+
+- The brain's socket listens on all interfaces without authentication; use it only on a trusted network.
+- The frame-size header uses `struct` format `"L"`, which is platform dependent; run brain and body on matching platforms.
+- Object vocabulary hints are hard-coded in `modulo_cerebro.py`.
+
+## Credits
+
+Jhamil Peña ([@Jaed69](https://github.com/Jaed69)).
+
+## License
+
+No license file is included in this repository.
